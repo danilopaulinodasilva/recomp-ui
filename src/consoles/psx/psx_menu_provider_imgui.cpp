@@ -9,6 +9,7 @@
 
 #if defined(RUI_PSX_HAS_MENU_HOST)
 #include "psx_menu_provider_internal.h"
+#include "recomp_ui_psx_menu.h"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
@@ -20,7 +21,10 @@
 #endif
 
 #include <cfloat>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 
 namespace rui_psx {
 namespace {
@@ -29,6 +33,42 @@ ImGuiContext *g_ctx = nullptr;   // GL thread
 bool g_gl_ready = false;
 uint64_t g_last_ns = 0;
 unsigned g_pad_held = 0;         // main thread
+float g_font_px = 0.0f;          // GL thread: size of the loaded title font
+
+// The title's TTF at the size the fullscreen menu wants for this display
+// (20 px per 720 lines), reloaded when the window's height changes enough.
+void update_font(int h) {
+    const char *rel = title_font();
+    if (!rel || !rel[0] || !(title_flags() & RECOMP_UI_PSX_TITLE_FULLSCREEN)) return;
+    float px = 20.0f * std::fmax(1.0f, std::fmin((float)h / 720.0f, 4.0f));
+    px = std::round(px);
+    if (g_font_px > 0.0f && std::fabs(px - g_font_px) < 1.0f) return;
+    std::string path = rel;
+    if (rel[0] != '/') {
+#if defined(LNG_SDL3)
+        const char *base = SDL_GetBasePath();
+#else
+        char *base = SDL_GetBasePath();
+#endif
+        path = std::string(base ? base : "") + rel;
+#if !defined(LNG_SDL3)
+        SDL_free(base);
+#endif
+    }
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f) { g_font_px = px; return; }  // keep ImGui's font; don't retry each frame
+    std::fclose(f);
+    ImGuiIO &io = ImGui::GetIO();
+    io.Fonts->Clear();
+    ImFontConfig cfg;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 2;
+    static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x2010, 0x2027, 0x2190, 0x2193, 0};
+    if (!io.Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, kRanges)) io.Fonts->AddFontDefault();
+    ImGui_ImplOpenGL3_DestroyFontsTexture();
+    ImGui_ImplOpenGL3_CreateFontsTexture();
+    g_font_px = px;
+}
 
 #if defined(LNG_SDL3)
 constexpr unsigned kBack = 1u << SDL_GAMEPAD_BUTTON_BACK;
@@ -61,6 +101,11 @@ int sdl_event(const void *p) {
         const SDL_Keycode k = e.key.key;
         const bool ctrl = (e.key.mod & SDL_KMOD_CTRL) != 0;
         if (!e.key.repeat && (k == SDLK_F10 || (ctrl && k == SDLK_L))) {
+            input(RECOMP_RUNTIME_UI_INPUT_TOGGLE);
+            return 1;
+        }
+        if (!open && !e.key.repeat && k == SDLK_ESCAPE &&
+            (title_flags() & RECOMP_UI_PSX_TITLE_ESCAPE_OPENS) && !netplay_active()) {
             input(RECOMP_RUNTIME_UI_INPUT_TOGGLE);
             return 1;
         }
@@ -121,6 +166,7 @@ void draw(int w, int h) {
     ImGui::SetCurrentContext(g_ctx);
     if (!g_gl_ready) g_gl_ready = ImGui_ImplOpenGL3_Init(nullptr);
     if (!g_gl_ready) { ImGui::SetCurrentContext(prev); return; }
+    update_font(h);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
     io.DisplayFramebufferScale = ImVec2(1, 1);
@@ -151,6 +197,7 @@ void release_gl() {
     g_ctx = nullptr;
     g_gl_ready = false;
     g_last_ns = 0;
+    g_font_px = 0.0f;
 }
 
 }  // namespace rui_psx

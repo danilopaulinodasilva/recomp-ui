@@ -7,6 +7,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -18,6 +19,37 @@ ImVec4 col(const LngColor &c, float alpha = 1.0f) {
 
 ImU32 u32(const LngColor &c, float alpha = 1.0f) {
     return ImGui::ColorConvertFloat4ToU32(col(c, alpha));
+}
+
+LngColor rgb(uint32_t v) {
+    return lng_rgba(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f,
+                    (v & 0xFF) / 255.0f, 1.0f);
+}
+
+// The config's theme, with the title's palette over it when it has one.
+LauncherTheme menu_theme(const RecompRuntimeUi *ui) {
+    LauncherTheme theme = launcher_theme_by_name(ui->config.theme);
+    if (const RecompRuntimeUiPalette *p = ui->config.palette) {
+        theme.background = rgb(p->background);
+        theme.panel = rgb(p->panel);
+        theme.panel_hovered = rgb(p->panel_hovered);
+        theme.control = rgb(p->control);
+        theme.control_hovered = rgb(p->control_hovered);
+        theme.border = rgb(p->border);
+        theme.accent = rgb(p->accent);
+        theme.accent_dim = rgb(p->accent_dim);
+        theme.accent2 = rgb(p->accent2);
+        theme.text = rgb(p->text);
+        theme.text_muted = rgb(p->text_muted);
+    }
+    return theme;
+}
+
+// Fullscreen presentation: a bar in the accent colour beside the selected row.
+void selection_bar(const LauncherTheme &theme, ImVec2 min, ImVec2 max) {
+    const float w = std::max(3.0f, theme.spacing_xs);
+    ImGui::GetWindowDrawList()->AddRectFilled(min, ImVec2(min.x + w, max.y),
+                                              u32(theme.accent));
 }
 
 void value_text(RecompRuntimeUi *ui, const RecompRuntimeUiItem *item,
@@ -61,12 +93,20 @@ void value_text(RecompRuntimeUi *ui, const RecompRuntimeUiItem *item,
 }
 
 void draw_sections(RecompRuntimeUi *ui, const LauncherTheme &theme,
-                   bool enter_on_click) {
+                   bool enter_on_click, bool bars = false) {
     for (size_t index = 0; index < ui->section_count; ++index) {
         ImGui::PushID(static_cast<int>(index));
         const bool selected = index == ui->section_index;
-        const bool clicked = ImGui::Selectable(ui->sections[index], selected, 0,
-                                               ImVec2(0.0f, theme.row_height));
+        // Fullscreen: text centred in the row, clear of the selection bar.
+        if (bars) ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
+        char label[128];
+        std::snprintf(label, sizeof(label), bars ? "   %s" : "%s", ui->sections[index]);
+        const bool clicked = ImGui::Selectable(
+            label, selected, 0,
+            ImVec2(0.0f, bars ? theme.row_height * 0.75f : theme.row_height));
+        if (bars) ImGui::PopStyleVar();
+        if (selected && bars)
+            selection_bar(theme, ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
         if ((clicked || ImGui::IsItemHovered()) &&
             (index != ui->section_index || (clicked && enter_on_click))) {
             const int was_in_section = ui->in_section;
@@ -78,7 +118,7 @@ void draw_sections(RecompRuntimeUi *ui, const LauncherTheme &theme,
 }
 
 void draw_items(RecompRuntimeUi *ui, const LauncherTheme &theme,
-                bool touch_friendly) {
+                bool touch_friendly, bool bars = false) {
     const size_t count = recomp_runtime_ui_page_entry_count(ui);
     for (size_t index = 0; index < count; ++index) {
         char folder[96];
@@ -149,6 +189,7 @@ void draw_items(RecompRuntimeUi *ui, const LauncherTheme &theme,
 
         ImDrawList *draw = ImGui::GetWindowDrawList();
         const ImVec2 end = ImGui::GetItemRectMax();
+        if (selected && bars) selection_bar(theme, start, end);
         const ImVec2 next = ImGui::GetCursorScreenPos();
         const ImU32 label_color = u32(enabled ? theme.text : theme.text_muted,
                                       enabled ? 1.0f : 0.65f);
@@ -302,23 +343,37 @@ void draw_toast(RecompRuntimeUi *ui, const LauncherTheme &theme) {
     ImGui::PopStyleVar(3);
 }
 
+// The config's draw_section, for the section the page shows (top level only).
+bool draw_custom_section(RecompRuntimeUi *ui, float scale) {
+    if (!ui->config.draw_section || ui->page[0] ||
+        ui->section_index >= ui->section_count)
+        return false;
+    return ui->config.draw_section(ui->config.callbacks.context,
+                                   ui->sections[ui->section_index], scale) != 0;
+}
+
 } // namespace
 
 extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
     if (!ui || ImGui::GetCurrentContext() == nullptr) return;
     if (!ui->open) {
         if (recomp_runtime_ui_toast_visible(ui))
-            draw_toast(ui, launcher_theme_by_name(ui->config.theme));
+            draw_toast(ui, menu_theme(ui));
         return;
     }
 
-    LauncherTheme theme = launcher_theme_by_name(ui->config.theme);
+    LauncherTheme theme = menu_theme(ui);
     ImGuiIO &io = ImGui::GetIO();
     const ImVec2 display = io.DisplaySize;
     if (display.x <= 0.0f || display.y <= 0.0f) return;
     const bool touch_friendly =
         (ui->config.presentation_flags &
          RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY) != 0;
+    const bool full = !touch_friendly &&
+        (ui->config.presentation_flags &
+         RECOMP_RUNTIME_UI_PRESENTATION_FULLSCREEN) != 0;
+    // Fullscreen metrics are sized for 720 lines and grow with the display.
+    const float full_scale = full ? std::clamp(display.y / 720.0f, 1.0f, 4.0f) : 1.0f;
 
     ImGui::GetBackgroundDrawList()->AddRectFilled(
         ImVec2(0.0f, 0.0f), display,
@@ -328,20 +383,22 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
     const float touch_row_height =
         std::clamp(short_axis * 0.085f, 92.0f, 124.0f);
     const float metric_scale =
-        touch_friendly ? touch_row_height / theme.row_height : 1.0f;
-    if (touch_friendly) {
+        touch_friendly ? touch_row_height / theme.row_height : full_scale;
+    if (touch_friendly || full) {
         theme.row_height *= metric_scale;
         theme.spacing_sm *= metric_scale;
         theme.spacing_md *= metric_scale;
         theme.spacing_lg *= metric_scale;
         theme.radius_sm *= metric_scale;
         theme.radius_lg *= metric_scale;
+        theme.spacing_xs *= metric_scale;
     }
-    const float margin = touch_friendly
+    if (full) theme.row_height *= 1.15f;
+    const float margin = full ? 0.0f : touch_friendly
         ? std::max(20.0f, short_axis * 0.025f)
         : 24.0f;
-    const float max_width = touch_friendly ? display.x : 780.0f;
-    const float max_height = touch_friendly ? display.y : 680.0f;
+    const float max_width = touch_friendly || full ? display.x : 780.0f;
+    const float max_height = touch_friendly || full ? display.y : 680.0f;
     const float width = display.x - margin * 2.0f < max_width
                             ? display.x - margin * 2.0f
                             : max_width;
@@ -354,6 +411,14 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
     ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
 
     push_runtime_style(theme, touch_friendly, ui->opacity);
+    if (full) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                            ImVec2(theme.spacing_lg * 2.0f, theme.spacing_lg * 1.5f));
+        // The game stays faintly visible behind the menu.
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, col(theme.background, 0.93f * ui->opacity));
+    }
     // The host drives selection through recomp_runtime_ui_handle_input. ImGui's
     // own keyboard/gamepad navigation would move a second, hidden cursor over
     // the same rows, and Enter / A would activate whichever row that one is
@@ -362,7 +427,10 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
                                    ImGuiWindowFlags_NoMove |
                                    ImGuiWindowFlags_NoSavedSettings |
                                    (ui->editing_text ? 0 : ImGuiWindowFlags_NoNavInputs);
-    if (ImGui::Begin("##recomp-runtime-ui", nullptr, flags)) {
+    const bool began = ImGui::Begin("##recomp-runtime-ui", nullptr, flags);
+    // The wide outer padding is the window's alone; children keep the theme's.
+    if (full) ImGui::PopStyleVar();
+    if (began) {
         if (touch_friendly) {
             // Scale toward a phone-readable physical size regardless of any
             // host-wide DPI scale already applied to the ImGui context.
@@ -375,9 +443,19 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
                 std::clamp(target_font_px / base_font_px, 1.0f, 4.0f);
             ImGui::SetWindowFontScale(font_scale);
         }
+        // Fullscreen: body text at 20 px per 720 lines. A host that loaded a
+        // font of that size gets it unscaled (and sharp).
+        float body_scale = 1.0f;
+        if (full) {
+            const float base_font_px = ImGui::GetFont()->FontSize * io.FontGlobalScale;
+            body_scale = std::clamp(20.0f * full_scale / base_font_px, 0.5f, 6.0f);
+            if (std::fabs(body_scale - 1.0f) < 0.08f) body_scale = 1.0f;
+            ImGui::SetWindowFontScale(body_scale * 1.7f);
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, col(theme.accent2));
         ImGui::TextUnformatted(ui->config.title ? ui->config.title : "Settings");
         ImGui::PopStyleColor();
+        if (full) ImGui::SetWindowFontScale(body_scale);
         if (ui->config.subtitle && ui->config.subtitle[0]) {
             ImGui::SameLine();
             const float subtitle_w = ImGui::CalcTextSize(ui->config.subtitle).x;
@@ -397,12 +475,14 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
         if (wide) {
             const float sidebar_w = touch_friendly
                 ? std::clamp(width * 0.20f, 280.0f, 520.0f)
-                : 190.0f;
+                : full ? 260.0f * full_scale : 190.0f;
             ImGui::BeginChild("##sections", ImVec2(sidebar_w, content_h), true);
-            draw_sections(ui, theme, false);
+            if (full) ImGui::SetWindowFontScale(body_scale * 1.1f);
+            draw_sections(ui, theme, false, full);
             ImGui::EndChild();
             ImGui::SameLine();
             ImGui::BeginChild("##items", ImVec2(0.0f, content_h), true);
+            if (full) ImGui::SetWindowFontScale(body_scale);
             char page_title[256];
             recomp_runtime_ui_page_title(ui, page_title, sizeof(page_title));
             if (ui->page[0]) {
@@ -413,7 +493,8 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
             ImGui::TextUnformatted(page_title);
             ImGui::PopStyleColor();
             ImGui::Separator();
-            draw_items(ui, theme, touch_friendly);
+            if (!draw_custom_section(ui, metric_scale))
+                draw_items(ui, theme, touch_friendly, full);
             ImGui::EndChild();
         } else {
             ImGui::BeginChild("##content", ImVec2(0.0f, content_h), true);
@@ -426,9 +507,10 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
                 recomp_runtime_ui_page_title(ui, page_title, sizeof(page_title));
                 ImGui::TextUnformatted(page_title);
                 ImGui::Separator();
-                draw_items(ui, theme, touch_friendly);
+                if (!draw_custom_section(ui, metric_scale))
+                    draw_items(ui, theme, touch_friendly, full);
             } else {
-                draw_sections(ui, theme, true);
+                draw_sections(ui, theme, true, full);
             }
             ImGui::EndChild();
         }
@@ -458,12 +540,16 @@ extern "C" void recomp_runtime_ui_render_imgui(RecompRuntimeUi *ui) {
             ? std::max(320.0f, ImGui::CalcTextSize(close_label).x +
                                    theme.spacing_lg * 2.0f)
             : ImGui::CalcTextSize(close_label).x + theme.spacing_lg * 2.0f;
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() -
-                             ImGui::GetStyle().WindowPadding.x - close_w);
+        // The window's own padding (fullscreen uses a wider one than the style).
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - close_w);
         if (ImGui::Button(close_label, ImVec2(close_w, close_h)))
             recomp_runtime_ui_close(ui);
     }
     ImGui::End();
+    if (full) {
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
     pop_runtime_style();
     // Over the menu too: a shortcut can still answer while it is open.
     if (recomp_runtime_ui_toast_visible(ui)) draw_toast(ui, theme);

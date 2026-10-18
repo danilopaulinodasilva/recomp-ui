@@ -13,6 +13,9 @@ namespace rui_psx {
 
 std::mutex &lock();
 RecompRuntimeUi *model();           // NULL when not attached
+unsigned title_flags();             // RECOMP_UI_PSX_TITLE_* (0 without a title)
+const char *title_font();           // the title's menu TTF, or NULL
+bool netplay_active();
 void input(int recomp_runtime_ui_input);  // caller holds lock()
 
 // Presentation side (psx_menu_provider_imgui.cpp; tests stub these).

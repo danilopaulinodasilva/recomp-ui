@@ -23,6 +23,9 @@ extern "C" {
 #define RECOMP_RUNTIME_UI_HAS_STATUS 1
 #define RECOMP_RUNTIME_UI_HAS_TOAST 1
 #define RECOMP_RUNTIME_UI_HAS_CONFIRM 1
+/* RecompRuntimeUiConfig.palette / draw_section and
+ * RECOMP_RUNTIME_UI_PRESENTATION_FULLSCREEN. */
+#define RECOMP_RUNTIME_UI_HAS_STYLE 1
 
 typedef struct RecompRuntimeUi RecompRuntimeUi;
 
@@ -129,6 +132,24 @@ typedef struct RecompRuntimeUiCallbacks {
                     const char *value);
 } RecompRuntimeUiCallbacks;
 
+/*
+ * A title's own colours for the menu, as 0xRRGGBB, in place of the theme's.
+ * Every field is used; start from a whole set rather than a partial one.
+ */
+typedef struct RecompRuntimeUiPalette {
+    uint32_t background;
+    uint32_t panel;
+    uint32_t panel_hovered;
+    uint32_t control;
+    uint32_t control_hovered;
+    uint32_t border;
+    uint32_t accent;        /* selection bar, buttons pressed */
+    uint32_t accent_dim;
+    uint32_t accent2;       /* headings and the selected value */
+    uint32_t text;
+    uint32_t text_muted;
+} RecompRuntimeUiPalette;
+
 typedef struct RecompRuntimeUiConfig {
     const char *title;
     const char *subtitle;
@@ -154,10 +175,29 @@ typedef struct RecompRuntimeUiConfig {
      * coupling the shared UI to a particular operating system.
      */
     uint32_t presentation_flags;
+
+    /* Optional: replaces the theme's colours. */
+    const RecompRuntimeUiPalette *palette;
+
+    /*
+     * Optional, ImGui presentation only: draws a section's page itself (a
+     * controls chart, credits...) in place of its rows. Called inside the
+     * page's child window with callbacks.context, the section's name and the
+     * menu's metric scale (1 at 720 lines); returns non-zero when it drew the
+     * page. The section still needs one item so it is listed.
+     */
+    int (*draw_section)(void *context, const char *section, float scale);
 } RecompRuntimeUiConfig;
 
 enum {
     RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY = UINT32_C(1) << 0,
+    /*
+     * The menu covers the whole display and its metrics grow with it (sized
+     * for 720 lines, scaled up from there). Fonts follow when the host loads
+     * one sized for the display (see the ImGui backend); otherwise ImGui's
+     * own font is scaled.
+     */
+    RECOMP_RUNTIME_UI_PRESENTATION_FULLSCREEN = UINT32_C(1) << 1,
 };
 
 typedef uint64_t RecompRuntimeUiStandardFeatures;

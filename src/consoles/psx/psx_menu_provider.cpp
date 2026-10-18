@@ -138,6 +138,11 @@ int cb_set(void *, const RecompRuntimeUiItem *item, int v) {
 
 void close_menu() { recomp_runtime_ui_close(g_ui); }
 
+int cb_draw_section(void *, const char *section, float scale) {
+    if (!g_title || !g_title->draw_section) return 0;
+    return g_title->draw_section(g_title->context, g_host, section, scale);
+}
+
 int cb_action(void *, const RecompRuntimeUiItem *item) {
     if (!g_host) return 0;
     if (is(item, RECOMP_RUNTIME_UI_KEY_RESUME)) {
@@ -260,6 +265,13 @@ int p_attach(void *, void *, void *, const PsxMenuHost *host) {
     cfg.menu.callbacks.run_action = cb_action;
     cfg.menu.callbacks.is_enabled = cb_enabled;
     cfg.menu.callbacks.visibility_changed = cb_visibility;
+    if (g_title) {
+        if (g_title->flags & RECOMP_UI_PSX_TITLE_FULLSCREEN)
+            cfg.menu.presentation_flags |= RECOMP_RUNTIME_UI_PRESENTATION_FULLSCREEN;
+        cfg.menu.palette = g_title->palette;
+        if (g_title->draw_section) cfg.menu.draw_section = cb_draw_section;
+        if (g_title->flags & RECOMP_UI_PSX_TITLE_ESCAPE_OPENS) cfg.menu.back_label = "Esc / Circle";
+    }
     cfg.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN | RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
                    RECOMP_RUNTIME_UI_STANDARD_FMV_FILTER | RECOMP_RUNTIME_UI_STANDARD_PAUSE_IN_MENU |
                    RECOMP_RUNTIME_UI_STANDARD_RESUME | RECOMP_RUNTIME_UI_STANDARD_RETURN_TO_LAUNCHER |
@@ -306,6 +318,9 @@ std::mutex &lock() {
     return m;
 }
 RecompRuntimeUi *model() { return g_ui; }
+unsigned title_flags() { return g_title ? g_title->flags : 0u; }
+const char *title_font() { return g_title ? g_title->font_path : nullptr; }
+bool netplay_active() { return netplay(); }
 void input(int in) {
     if (!g_ui) return;
     if (in == RECOMP_RUNTIME_UI_INPUT_TOGGLE) {

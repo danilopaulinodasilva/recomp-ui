@@ -12,7 +12,8 @@
  *     closes); System: pause in menu, resume, return to launcher, quit;
  *     Disc: selected disc and Insert disc and resume (multi-disc titles,
  *     through the runtime's tray policy).
- *   - Opens with F10 or Ctrl+L, or Select + L3 on a controller; arrows,
+ *   - Opens with F10 or Ctrl+L, or Select + L3 on a controller (and Escape
+ *     when the title asks for it); arrows,
  *     Enter/Space, Esc/Backspace, D-pad, Cross/Circle navigate.
  *
  * psxrecomp uses this provider when the title registers none (recomp-ui is
@@ -70,7 +71,27 @@ typedef struct RecompUiPsxMenuTitle {
                       const struct RecompRuntimeUiItem *item);
     /* Optional: the menu opened (1) or closed (0). */
     void (*visibility_changed)(void *context, const struct PsxMenuHost *host, int open);
+
+    /* Presentation (RECOMP_UI_PSX_MENU_HAS_TITLE_STYLE); zero keeps the
+     * standard look. */
+    unsigned flags;                  /* RECOMP_UI_PSX_TITLE_* below */
+    const struct RecompRuntimeUiPalette *palette;
+    /* TTF for the menu, relative to the executable's directory (or absolute),
+     * loaded at the size the menu needs; NULL: ImGui's own font. */
+    const char *font_path;
+    /* Draws a section's page itself (recomp_runtime_ui.h draw_section), with
+     * the title's context; ImGui calls, inside the page. */
+    int (*draw_section)(void *context, const struct PsxMenuHost *host,
+                        const char *section, float scale);
 } RecompUiPsxMenuTitle;
+#define RECOMP_UI_PSX_MENU_HAS_TITLE_STYLE 1
+enum {
+    /* The menu covers the whole window and scales with it. */
+    RECOMP_UI_PSX_TITLE_FULLSCREEN = 1,
+    /* Escape opens the menu too (not during netplay, where Escape leaves the
+     * session). Inside the menu Escape is Back, and closes it at the top. */
+    RECOMP_UI_PSX_TITLE_ESCAPE_OPENS = 2
+};
 /* Main thread, before the game window opens (or NULL to clear). */
 void recomp_ui_psx_menu_set_title(const RecompUiPsxMenuTitle *title);
 
