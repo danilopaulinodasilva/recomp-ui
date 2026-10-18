@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace rui_psx {
 namespace {
@@ -26,11 +27,15 @@ const PsxMenuHost *g_host = nullptr;
 RecompRuntimeUi *g_ui = nullptr;
 PsxHostVideoSettings g_video{};    // the menu's working copy, from video_get
 unsigned g_restart = 0;            // restart-only edits made while open
+unsigned g_restart_video = 0;      // ...from the video settings
+unsigned g_restart_title = 0;      // ...from title rows (RECOMP_UI_PSX_TITLE_RESTART)
 bool g_pause_in_menu = true;
 bool g_paused = false;
 int g_disc = 1;
 char g_status[160];
 char g_subtitle[96];
+const RecompUiPsxMenuTitle *g_title = nullptr;  // recomp_ui_psx_menu_set_title
+std::vector<RecompRuntimeUiItem> g_items;       // the extra rows of this attach
 
 // Texture filtering offers the host's own vocabulary (the launcher game
 // info's texture_filter catalog, shared with the pre-game launcher), so every
@@ -42,6 +47,9 @@ RecompRuntimeUiItem g_extra[] = {
     {"graphics.texture_filter", "Graphics", "Texture filtering",
      "Nearest, bilinear, or xBR sampling of game textures.",
      RECOMP_RUNTIME_UI_CHOICE, 0, 1, 1, kLegacyFilters, 2, kLegacyFilterValues},
+    {"graphics.internal_resolution", "Graphics", "Internal resolution",
+     "Rendering resolution; restarts when this menu closes.",
+     RECOMP_RUNTIME_UI_CHOICE, 0, 0, 1, nullptr, 0, nullptr},
     {"graphics.render_thread", "Graphics", "Render thread",
      "Use a second CPU thread; restarts when this menu closes.",
      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr},
@@ -51,7 +59,15 @@ RecompRuntimeUiItem g_extra[] = {
      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, nullptr, 0, nullptr},
 };
 
+enum { kTexFilter, kInternalRes, kRenderThread, kDisc, kInsert };
+
 bool is(const RecompRuntimeUiItem *item, const char *key) { return item && item->key && !std::strcmp(item->key, key); }
+bool is_title(const RecompRuntimeUiItem *item) {
+    if (!g_title || !item || !g_title->items) return false;
+    for (size_t i = 0; i < g_title->item_count; ++i)
+        if (g_title->items[i].key && is(item, g_title->items[i].key)) return true;
+    return false;
+}
 int disc_count() { return g_host && g_host->disc_count ? g_host->disc_count() : 0; }
 bool netplay() { return g_host && g_host->netplay_active && g_host->netplay_active(); }
 
@@ -67,7 +83,8 @@ void apply_video() {
         status("Applies after the match");
         return;  // never relaunch during netplay
     }
-    g_restart = bits & (PSX_VIDEO_RESTART_RENDERER | PSX_VIDEO_RESTART_RESOLUTION | PSX_VIDEO_RESTART_THREADS);
+    g_restart_video = bits & (PSX_VIDEO_RESTART_RENDERER | PSX_VIDEO_RESTART_RESOLUTION | PSX_VIDEO_RESTART_THREADS);
+    g_restart = g_restart_video | g_restart_title;
     if (g_restart) status("Applies with a quick restart when you close the menu");
 }
 
@@ -76,7 +93,9 @@ int cb_get(void *, const RecompRuntimeUiItem *item, int *out) {
     else if (is(item, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) *out = g_video.present_linear;
     else if (is(item, RECOMP_RUNTIME_UI_KEY_FMV_FILTER)) *out = g_video.fmv_filter;  // config value == choice index
     else if (is(item, "graphics.texture_filter")) *out = g_video.texture_filter;
+    else if (is(item, "graphics.internal_resolution")) *out = g_video.internal_resolution;
     else if (is(item, "graphics.render_thread")) *out = g_video.render_thread;
+    else if (is_title(item)) return g_title->get_value ? g_title->get_value(g_title->context, g_host, item, out) : 0;
     else if (is(item, RECOMP_RUNTIME_UI_KEY_PAUSE_IN_MENU)) *out = g_pause_in_menu ? 1 : 0;
     else if (is(item, "media.disc")) *out = g_disc;
     else return 0;
@@ -88,8 +107,17 @@ int cb_set(void *, const RecompRuntimeUiItem *item, int v) {
     else if (is(item, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) g_video.present_linear = v ? 1 : 0;
     else if (is(item, RECOMP_RUNTIME_UI_KEY_FMV_FILTER)) g_video.fmv_filter = v;
     else if (is(item, "graphics.texture_filter")) g_video.texture_filter = v;
+    else if (is(item, "graphics.internal_resolution")) g_video.internal_resolution = v;
     else if (is(item, "graphics.render_thread")) g_video.render_thread = v ? 1 : 0;
-    else if (is(item, RECOMP_RUNTIME_UI_KEY_PAUSE_IN_MENU)) {
+    else if (is_title(item)) {
+        const int r = g_title->set_value ? g_title->set_value(g_title->context, g_host, item, v) : 0;
+        if (r & RECOMP_UI_PSX_TITLE_RESTART) {
+            g_restart_title = PSX_VIDEO_RESTART_RENDERER;  // any bit: relaunch on close
+            g_restart = g_restart_video | g_restart_title;
+            status("Applies with a quick restart when you close the menu");
+        }
+        return r != 0;
+    } else if (is(item, RECOMP_RUNTIME_UI_KEY_PAUSE_IN_MENU)) {
         g_pause_in_menu = v != 0;
         const bool want = g_pause_in_menu && recomp_runtime_ui_is_open(g_ui);
         if (g_host && g_host->set_paused) {
@@ -133,6 +161,7 @@ int cb_action(void *, const RecompRuntimeUiItem *item) {
 
 int cb_enabled(void *, const RecompRuntimeUiItem *item) {
     if (item && item->key && !std::strncmp(item->key, "media.", 6)) return disc_count() > 1 && !netplay();
+    if (is_title(item) && g_title->is_enabled) return g_title->is_enabled(g_title->context, g_host, item);
     return 1;
 }
 
@@ -144,7 +173,8 @@ void cb_visibility(void *, int open) {
         recomp_runtime_ui_enter_section(g_ui, 0);
         recomp_runtime_ui_leave_section(g_ui);
         if (g_host->video_get) g_host->video_get(&g_video);
-        g_restart = 0;
+        g_restart = g_restart_video = g_restart_title = 0;
+        if (g_title && g_title->visibility_changed) g_title->visibility_changed(g_title->context, g_host, 1);
         const int mounted = g_host->disc_mounted ? g_host->disc_mounted() : 0;
         g_disc = mounted > 0 ? mounted : 1;
         if (disc_count() > 1) std::snprintf(g_subtitle, sizeof g_subtitle, "Mounted: Disc %d", mounted);
@@ -155,6 +185,7 @@ void cb_visibility(void *, int open) {
             if (!g_paused) status("Online: the game keeps running");
         }
     } else {
+        if (g_title && g_title->visibility_changed) g_title->visibility_changed(g_title->context, g_host, 0);
         if (g_paused && g_host->set_paused) g_host->set_paused(0);
         g_paused = false;
         if (g_restart) {
@@ -170,12 +201,13 @@ int p_attach(void *, void *, void *, const PsxMenuHost *host) {
     // Chosen by default (the title chose no provider): keep the title's
     // presentation -- recomp-ui's game menu is for multi-disc titles.
 #if defined(PSX_MENU_HOST_HAS_DEFAULT_SELECTION)
-    if (host->default_selection && (!host->disc_count || host->disc_count() < 2)) return 0;
+    // A title that registered its own rows chose this menu.
+    if (!g_title && host->default_selection && (!host->disc_count || host->disc_count() < 2)) return 0;
 #endif
     g_host = host;
     if (g_ui) recomp_runtime_ui_destroy(g_ui);
     const int discs = disc_count();
-    g_extra[2].maximum = discs > 1 ? discs : 1;
+    g_extra[kDisc].maximum = discs > 1 ? discs : 1;
     // The host's texture-filter catalog (attach runs on the main thread, where
     // launcher_game_info may be called).
     g_extra[0].choices = kLegacyFilters;
@@ -194,8 +226,31 @@ int p_attach(void *, void *, void *, const PsxMenuHost *host) {
 #endif
     g_extra[0].minimum = 0;
     g_extra[0].maximum = (int)g_extra[0].choice_count - 1;
+    // Internal resolution: only with the host's catalog (same vocabulary and
+    // encoding as the pre-game launcher); restart-only through video_apply.
+    bool have_ir = false;
+#if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
+    if (host->launcher_game_info) {
+        RecompLauncherCGameInfo gi{};
+        host->launcher_game_info(&gi);
+        if (gi.internal_resolution_labels && gi.internal_resolution_values && gi.num_internal_resolutions > 0) {
+            g_extra[kInternalRes].choices = gi.internal_resolution_labels;
+            g_extra[kInternalRes].choice_values = gi.internal_resolution_values;
+            g_extra[kInternalRes].choice_count = (size_t)gi.num_internal_resolutions;
+            g_extra[kInternalRes].maximum = gi.num_internal_resolutions - 1;
+            have_ir = true;
+        }
+    }
+#endif
+    g_items.clear();
+    g_items.push_back(g_extra[kTexFilter]);
+    if (have_ir) g_items.push_back(g_extra[kInternalRes]);
+    g_items.push_back(g_extra[kRenderThread]);
+    if (discs > 1) { g_items.push_back(g_extra[kDisc]); g_items.push_back(g_extra[kInsert]); }
+    if (g_title && g_title->items)
+        g_items.insert(g_items.end(), g_title->items, g_title->items + g_title->item_count);
     RecompRuntimeUiStandardConfig cfg{};
-    cfg.menu.title = "Game menu";
+    cfg.menu.title = g_title && g_title->menu_title ? g_title->menu_title : "Game menu";
     cfg.menu.subtitle = g_subtitle;
     cfg.menu.theme = "psx";
     cfg.menu.accept_label = "Enter / Cross";
@@ -209,8 +264,8 @@ int p_attach(void *, void *, void *, const PsxMenuHost *host) {
                    RECOMP_RUNTIME_UI_STANDARD_FMV_FILTER | RECOMP_RUNTIME_UI_STANDARD_PAUSE_IN_MENU |
                    RECOMP_RUNTIME_UI_STANDARD_RESUME | RECOMP_RUNTIME_UI_STANDARD_RETURN_TO_LAUNCHER |
                    RECOMP_RUNTIME_UI_STANDARD_QUIT;
-    cfg.extra_items = g_extra;
-    cfg.extra_item_count = discs > 1 ? 4 : 2;
+    cfg.extra_items = g_items.data();
+    cfg.extra_item_count = g_items.size();
     g_ui = recomp_runtime_ui_create_standard(&cfg);
     if (!g_ui) { g_host = nullptr; return 0; }
     return 1;
@@ -264,6 +319,10 @@ void input(int in) {
 }  // namespace rui_psx
 
 extern "C" const PsxMenuProvider *recomp_ui_psx_menu_provider(void) { return &rui_psx::g_provider; }
+extern "C" void recomp_ui_psx_menu_set_title(const RecompUiPsxMenuTitle *title) {
+    std::lock_guard<std::mutex> lk(rui_psx::lock());
+    rui_psx::g_title = title;
+}
 extern "C" void recomp_ui_psx_menu_input(int in) {
     std::lock_guard<std::mutex> lk(rui_psx::lock());
     rui_psx::input(in);
